@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+web/build/
+web/.svelte-kit/
+server/certificate-server
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Env
+.env
+.env.*
