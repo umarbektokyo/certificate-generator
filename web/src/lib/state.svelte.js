@@ -46,8 +46,8 @@ export function getSelectedField() {
 
 // --- Recipients ---
 export let recipients = $state(/** @type {Recipient[]} */ ([
-	{ name: 'Jane Doe', course: 'Web Development', date: '2026-03-26' },
-	{ name: 'John Smith', course: 'Web Development', date: '2026-03-26' },
+	{ name: 'Your Name', course: 'Qualification', date: '2026-03-26' },
+	{ name: 'Umarbek B', course: 'Or Unqualification', date: '2026-03-26' },
 ]));
 
 export let previewIndex = $state({ value: 0 });

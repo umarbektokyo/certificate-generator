@@ -5,6 +5,7 @@
 
 <svelte:head>
 	<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+	<link rel="apple-touch-icon" href="/icon.png" />
 	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
 
 	<meta name="description" content="Design certificate templates with drag-and-drop, import recipients from CSV, and generate bulk PDFs instantly." />
