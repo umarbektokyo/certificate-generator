@@ -16,6 +16,9 @@ export let template = $state({
 	bgX: 50,           // horizontal position 0-100 (only for cover/contain)
 	bgY: 50,           // vertical position 0-100
 	bgScale: 100,      // additional scale percentage (100 = default)
+	bgPdfData: /** @type {string|null} */ (null), // raw PDF base64 for server-side import
+	bgPdfW: /** @type {number|null} */ (null),   // original PDF width in mm
+	bgPdfH: /** @type {number|null} */ (null),   // original PDF height in mm
 });
 
 // --- Fields ---
@@ -30,13 +33,23 @@ export let selectedFieldId = $state({ value: /** @type {string|null} */ (null) }
 export function addField(key = 'field') {
 	const f = { id: uid(), key, x: 50, y: 50, fontSize: 14, fontFamily: 'sans-serif', color: '#333333', align: 'center', valign: 'middle', bold: false, italic: false};
 	fields.push(f);
+	for (const r of recipients) {
+		if (!(key in r)) r[key] = '';
+	}
 	selectedFieldId.value = f.id;
 	return f;
 }
 
 export function removeField(id) {
-	const idx = fields.findIndex(f => f.id === id);
-	if (idx !== -1) fields.splice(idx, 1);
+	const field = fields.find(f => f.id === id);
+	if (field) {
+		const key = field.key;
+		fields.splice(fields.indexOf(field), 1);
+		// Remove key from all recipients if no other field uses the same key
+		if (!fields.some(f => f.key === key)) {
+			for (const r of recipients) delete r[key];
+		}
+	}
 	if (selectedFieldId.value === id) selectedFieldId.value = null;
 }
 
@@ -81,6 +94,10 @@ const PAGE_SIZES = {
 };
 
 export function getPageDimensions() {
+	// Use actual PDF dimensions when a PDF background is loaded
+	if (template.bgPdfW && template.bgPdfH) {
+		return { w: template.bgPdfW, h: template.bgPdfH };
+	}
 	const base = PAGE_SIZES[template.pageSize] ?? PAGE_SIZES.A4;
 	if (template.orientation === 'portrait') return { w: base.h, h: base.w };
 	return { w: base.w, h: base.h };

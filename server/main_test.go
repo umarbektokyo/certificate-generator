@@ -329,7 +329,7 @@ func TestGeneratePDF_AllFontFamilies(t *testing.T) {
 		field := Field{Key: "name", X: 50, Y: 50, FontSize: 16, Font: font, Color: "#000", Align: "center"}
 		req.Fields = []Field{field}
 
-		pdfBytes, err := generatePDF(req, recipient, nil, "", make(map[string]bool))
+		pdfBytes, err := generatePDF(req, recipient, nil, nil, "", make(map[string]bool))
 		if err != nil {
 			t.Errorf("generatePDF with font %q failed: %v", font, err)
 			continue
@@ -345,7 +345,7 @@ func TestGeneratePDF_EmptyFieldValue(t *testing.T) {
 	req.Fields = []Field{{Key: "name", X: 50, Y: 50, FontSize: 16, Font: "sans-serif", Color: "#000", Align: "left"}}
 	recipient := map[string]string{"name": ""} // empty value should be skipped
 
-	pdfBytes, err := generatePDF(req, recipient, nil, "", make(map[string]bool))
+	pdfBytes, err := generatePDF(req, recipient, nil, nil, "", make(map[string]bool))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

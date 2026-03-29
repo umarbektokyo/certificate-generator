@@ -1,9 +1,11 @@
 <script>
 	import BlenderPanel from './BlenderPanel.svelte';
+	import JSZip from 'jszip';
 	import { parseCSV } from '$lib/csv.js';
 	import { fields, recipients, previewIndex, generating, genProgress, template, getPageDimensions, customFonts } from '$lib/state.svelte.js';
 
 	let csvError = $state('');
+	let quality = $state('pdf');
 
 	function handleCSVUpload(e) {
 		const file = e.target.files?.[0];
@@ -24,7 +26,7 @@
 						fields.push({
 							id: 'f' + Date.now() + Math.random().toString(36).slice(2, 5),
 							key: h, x: 50, y: yOff, fontSize: 14, fontFamily: 'sans-serif',
-							color: '#333333', align: 'center', bold: false, italic: false,
+							color: '#333333', align: 'center', valign: 'middle', bold: false, italic: false,
 						});
 						yOff += 8;
 					}
@@ -52,13 +54,23 @@
 		generating.value = true;
 		genProgress.value = 0;
 		genProgress.total = recipients.length;
+
+		if (quality === 'pdf') {
+			await generatePDF();
+		} else {
+			await clientGen();
+		}
+		generating.value = false;
+	}
+
+	async function generatePDF() {
 		const dims = getPageDimensions();
-		// Collect custom fonts used by fields
 		const usedCustom = new Set(fields.map(f => f.fontFamily).filter(f => !['sans-serif','serif','monospace'].includes(f)));
 		const fontsPayload = customFonts.filter(cf => usedCustom.has(cf.name)).map(cf => ({ name: cf.name, data: cf.data }));
-
 		const payload = {
-			background: template.bgImage || null, bgColor: template.bgColor,
+			background: template.bgPdfData ? null : (template.bgImage || null),
+			bgPdf: template.bgPdfData || null,
+			bgColor: template.bgColor,
 			bgFit: template.bgFit ?? 'cover',
 			bgX: template.bgX ?? 50,
 			bgY: template.bgY ?? 50,
@@ -70,10 +82,11 @@
 		};
 		try {
 			const res = await fetch('/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-			if (!res.ok) { alert('Failed: ' + await res.text()); return; }
+			if (!res.ok) throw new Error(await res.text());
 			dl(await res.blob(), 'certificates.zip');
-		} catch { await clientGen(); }
-		finally { generating.value = false; }
+		} catch {
+			alert('PDF server unavailable. Select a PNG quality option or start the Go server.');
+		}
 	}
 
 	function drawBgImage(ctx, img, cw, ch) {
@@ -107,7 +120,9 @@
 
 	async function clientGen() {
 		const dims = getPageDimensions();
-		const s = 3, cw = Math.round(dims.w * s), ch = Math.round(dims.h * s);
+		const scaleMap = { low: 3, medium: 6, high: 10, ultra: 14 };
+		const s = scaleMap[quality] ?? 10;
+		const cw = Math.round(dims.w * s), ch = Math.round(dims.h * s);
 		const canvas = document.createElement('canvas');
 		canvas.width = cw; canvas.height = ch;
 		const ctx = canvas.getContext('2d');
@@ -116,6 +131,7 @@
 		if (template.bgImage) {
 			bgImg = await new Promise(r => { const i = new Image(); i.onload = () => r(i); i.onerror = () => r(null); i.src = template.bgImage; });
 		}
+		const zip = new JSZip();
 		for (let i = 0; i < recipients.length; i++) {
 			genProgress.value = i + 1;
 			const r = recipients[i];
@@ -123,9 +139,11 @@
 			if (bgImg) { drawBgImage(ctx, bgImg, cw, ch); }
 			for (const f of fields) { const v=r[f.key]; if(!v)continue; const x=(f.x/100)*cw,y=(f.y/100)*ch,sz=f.fontSize*s*0.3528; let fm='Inter,sans-serif'; if(f.fontFamily==='serif')fm='Georgia,serif'; if(f.fontFamily==='monospace')fm='Courier New,monospace'; ctx.font=`${f.italic?'italic ':''}${f.bold?'700':'400'} ${sz}px ${fm}`; ctx.fillStyle=f.color; ctx.textAlign=/** @type{CanvasTextAlign}*/(f.align); const vb=f.valign==='top'?'top':f.valign==='bottom'?'bottom':'middle'; ctx.textBaseline=/** @type{CanvasTextBaseline}*/(vb); ctx.fillText(v,x,y); }
 			const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
-			dl(blob, (r[fields[0]?.key]||`certificate_${i+1}`)+'.png');
-			if (recipients.length > 1) await new Promise(r => setTimeout(r, 80));
+			const name = (r[fields[0]?.key] || `certificate_${i + 1}`) + '.png';
+			zip.file(name, blob);
 		}
+		const zipBlob = await zip.generateAsync({ type: 'blob' });
+		dl(zipBlob, 'certificates.zip');
 	}
 </script>
 
@@ -197,6 +215,15 @@
 	{/if}
 
 	<BlenderPanel title="Export" icon='<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>' open={true}>
+		<div style="display:flex;align-items:center;justify-content:space-between;gap:4px;">
+			<span class="prop-label" style="flex-shrink:0">Quality</span>
+			<span style="color:#888;font-size:10px;flex-shrink:0">{{ pdf:'Vector PDF', low:'~890×630', medium:'~1780×1260', high:'~2970×2100', ultra:'~4160×2940' }[quality]}</span>
+		</div>
+		<div class="btn-row" style="display:flex;gap:2px;">
+			{#each [['pdf','PDF'],['low','Low'],['medium','Med'],['high','High'],['ultra','Ultra']] as [v,l]}
+				<button class="bw btn-sm" style="flex:1" class:active={quality===v} onclick={()=>quality=v}>{l}</button>
+			{/each}
+		</div>
 		<button
 			class="bw btn-action"
 			disabled={generating.value || recipients.length === 0 || fields.length === 0}
@@ -206,11 +233,11 @@
 			{#if generating.value}
 				Generating {genProgress.value}/{genProgress.total}...
 			{:else}
-				Download {recipients.length} PDF{recipients.length !== 1 ? 's' : ''}
+				Download {recipients.length} Certificate{recipients.length !== 1 ? 's' : ''}
 			{/if}
 		</button>
 		<span style="color:#555;font-size:10px">
-			ZIP of PDFs via server. PNG fallback if offline.
+			ZIP of PNGs. Higher quality = larger file size.
 		</span>
 	</BlenderPanel>
 </div>

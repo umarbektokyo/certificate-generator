@@ -34,6 +34,9 @@
 			e.target.value = '';
 			return;
 		}
+		template.bgPdfData = null;
+		template.bgPdfW = null;
+		template.bgPdfH = null;
 		const reader = new FileReader();
 		reader.onload = () => {
 			template.bgImage = /** @type {string} */ (reader.result);
@@ -47,6 +50,12 @@
 		pdfLoading = true;
 		try {
 			const arrayBuf = await file.arrayBuffer();
+			// Store raw PDF bytes for server-side vector import
+			const uint8 = new Uint8Array(arrayBuf);
+			let binary = '';
+			for (let i = 0; i < uint8.length; i++) binary += String.fromCharCode(uint8[i]);
+			template.bgPdfData = btoa(binary);
+			// Render preview for the canvas editor
 			const pdfjsLib = await loadPdfJs();
 			const pdf = await pdfjsLib.getDocument({ data: arrayBuf }).promise;
 			const page = await pdf.getPage(1);
@@ -58,6 +67,9 @@
 			template.bgImage = canvas.toDataURL('image/png');
 			template.bgFileName = file.name;
 			const base = page.getViewport({ scale: 1 });
+			// PDF.js viewport units are CSS points (1/72 inch). Convert to mm.
+			template.bgPdfW = base.width * 25.4 / 72;
+			template.bgPdfH = base.height * 25.4 / 72;
 			template.orientation = base.width > base.height ? 'landscape' : 'portrait';
 		} catch (err) {
 			alert('Failed to load PDF: ' + (err.message || err));
@@ -79,6 +91,9 @@
 	function clearBg() {
 		template.bgImage = null;
 		template.bgFileName = null;
+		template.bgPdfData = null;
+		template.bgPdfW = null;
+		template.bgPdfH = null;
 	}
 </script>
 

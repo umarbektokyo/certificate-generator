@@ -14,7 +14,11 @@ import (
 	"os"
 	"strings"
 
+	"io"
+
 	"github.com/go-pdf/fpdf"
+	cfpdi "github.com/go-pdf/fpdf/contrib/gofpdi"
+	gofpdiLib "github.com/phpdave11/gofpdi"
 )
 
 type Field struct {
@@ -37,6 +41,7 @@ type CustomFont struct {
 
 type GenerateRequest struct {
 	Background  string              `json:"background"`
+	BgPdf       string              `json:"bgPdf"`   // base64-encoded original PDF for vector import
 	BgColor     string              `json:"bgColor"`
 	BgFit       string              `json:"bgFit"`   // cover, contain, stretch, original
 	BgX         float64             `json:"bgX"`     // 0-100 horizontal position
@@ -116,7 +121,18 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Decode background image if provided
+	// Decode background PDF if provided
+	var bgPdfBytes []byte
+	if req.BgPdf != "" {
+		var err error
+		bgPdfBytes, err = base64.StdEncoding.DecodeString(req.BgPdf)
+		if err != nil {
+			http.Error(w, "Invalid background PDF: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Decode background image if provided (non-PDF)
 	var bgImageBytes []byte
 	var bgImageType string
 	if req.Background != "" {
@@ -134,7 +150,7 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 	loadedFonts := make(map[string]bool)
 
 	for i, recipient := range req.Recipients {
-		pdfBytes, err := generatePDF(req, recipient, bgImageBytes, bgImageType, loadedFonts)
+		pdfBytes, err := generatePDF(req, recipient, bgPdfBytes, bgImageBytes, bgImageType, loadedFonts)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("PDF generation failed for recipient %d: %v", i+1, err), http.StatusInternalServerError)
 			return
@@ -164,16 +180,34 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 	w.Write(zipBuf.Bytes())
 }
 
-func generatePDF(req GenerateRequest, recipient map[string]string, bgImageBytes []byte, bgImageType string, loadedFonts map[string]bool) ([]byte, error) {
-	// Determine orientation from requested dimensions
-	orient := "L"
-	if req.Height > req.Width {
-		orient = "P"
+func generatePDF(req GenerateRequest, recipient map[string]string, bgPdfBytes []byte, bgImageBytes []byte, bgImageType string, loadedFonts map[string]bool) ([]byte, error) {
+	var pageW, pageH float64
+
+	// If we have a PDF background, read its actual page size in points, convert to mm
+	if bgPdfBytes != nil {
+		imp := gofpdiLib.NewImporter()
+		var rs io.ReadSeeker = bytes.NewReader(bgPdfBytes)
+		imp.SetSourceStream(&rs)
+		sizes := imp.GetPageSizes()
+		if box, ok := sizes[1]["/MediaBox"]; ok {
+			// gofpdi returns sizes in points (1pt = 25.4/72 mm)
+			pageW = box["w"] / 72.0 * 25.4
+			pageH = box["h"] / 72.0 * 25.4
+		}
 	}
 
-	// fpdf Size defines the base page size in portrait; the OrientationStr swaps for landscape.
-	// So always pass the smaller dimension as Wd and larger as Ht (portrait base).
-	sizeW, sizeH := req.Width, req.Height
+	// Fall back to requested dimensions
+	if pageW <= 0 || pageH <= 0 {
+		pageW = req.Width
+		pageH = req.Height
+	}
+
+	// fpdf expects portrait-base size (smaller=Wd, larger=Ht) and an orientation string
+	orient := "L"
+	if pageH > pageW {
+		orient = "P"
+	}
+	sizeW, sizeH := pageW, pageH
 	if sizeW > sizeH {
 		sizeW, sizeH = sizeH, sizeW
 	}
@@ -204,17 +238,25 @@ func generatePDF(req GenerateRequest, recipient map[string]string, bgImageBytes 
 
 	pdf.AddPage()
 
-	// The actual page dimensions after fpdf applies orientation
-	pageW, pageH := pdf.GetPageSize()
+	// Get the actual page size fpdf created (after orientation applied)
+	actualW, actualH := pdf.GetPageSize()
 
-	// Background color
-	bgR, bgG, bgB := hexToRGB(req.BgColor)
-	pdf.SetFillColor(bgR, bgG, bgB)
-	pdf.Rect(0, 0, pageW, pageH, "F")
+	if bgPdfBytes != nil {
+		// Import original PDF page as vector template
+		imp := cfpdi.NewImporter()
+		var rs io.ReadSeeker = bytes.NewReader(bgPdfBytes)
+		tpl := imp.ImportPageFromStream(pdf, &rs, 1, "/MediaBox")
+		imp.UseImportedTemplate(pdf, tpl, 0, 0, actualW, actualH)
+	} else {
+		// Background color
+		bgR, bgG, bgB := hexToRGB(req.BgColor)
+		pdf.SetFillColor(bgR, bgG, bgB)
+		pdf.Rect(0, 0, actualW, actualH, "F")
 
-	// Background image
-	if bgImageBytes != nil {
-		registerAndPlaceImage(pdf, bgImageBytes, bgImageType, pageW, pageH, req.BgFit, req.BgX, req.BgY, req.BgScale)
+		// Background image
+		if bgImageBytes != nil {
+			registerAndPlaceImage(pdf, bgImageBytes, bgImageType, actualW, actualH, req.BgFit, req.BgX, req.BgY, req.BgScale)
+		}
 	}
 
 	// Render fields
@@ -224,7 +266,6 @@ func generatePDF(req GenerateRequest, recipient map[string]string, bgImageBytes 
 			continue
 		}
 
-		// Font style - map to PDF built-in fonts, custom fonts, or system font approximations
 		fontFamily := "Helvetica"
 		switch field.Font {
 		case "serif", "Georgia", "Palatino", "Garamond":
@@ -249,20 +290,18 @@ func generatePDF(req GenerateRequest, recipient map[string]string, bgImageBytes 
 
 		pdf.SetFont(fontFamily, style, field.FontSize)
 
-		// Color
 		cr, cg, cb := hexToRGB(field.Color)
 		pdf.SetTextColor(cr, cg, cb)
 
-		// Position (percentage to mm)
-		x := (field.X / 100) * pageW
-		y := (field.Y / 100) * pageH
+		// Position: field.X/Y are percentages (0-100) of the page
+		x := (field.X / 100) * actualW
+		y := (field.Y / 100) * actualH
 
-		// Font size in mm: 1pt = 25.4/72 mm ≈ 0.3528mm
-		fontMm := field.FontSize * 25.4 / 72.0
+		// Font size in mm (1pt = 25.4/72 mm)
+		fsMm := field.FontSize * 25.4 / 72.0
 
-		// Alignment
+		// Horizontal alignment
 		textWidth := pdf.GetStringWidth(text)
-
 		var drawX float64
 		switch field.Align {
 		case "center":
@@ -273,8 +312,18 @@ func generatePDF(req GenerateRequest, recipient map[string]string, bgImageBytes 
 			drawX = x
 		}
 
-		// pdf.Text Y is the baseline position.
-		// Vertical alignment: top = baseline near top, middle = centered, bottom = baseline near bottom
+		// Vertical alignment.
+		// CSS preview: div with font-size, line-height:normal (~1.2x font-size).
+		// translateY(-50%/0/-100%) offsets the div relative to its own height.
+		// fpdf.Text() Y = baseline.
+		//
+		// CSS div height ≈ fsMm * 1.2 (line-height:normal).
+		// Baseline within div ≈ (divH - fsMm)/2 + ascent*fsMm
+		// For Helvetica: ascent ≈ 0.72 of em → baseline from div top ≈ 0.1*fsMm + 0.72*fsMm = 0.82*fsMm
+		//
+		// middle: translateY(-50%) → div center at y → top = y - 0.6*fsMm → baseline = y + 0.22*fsMm
+		// top:    translateY(0)    → div top at y    → baseline = y + 0.82*fsMm
+		// bottom: translateY(-100%)→ div bottom at y → baseline = y - 0.38*fsMm
 		var drawY float64
 		valign := field.VAlign
 		if valign == "" {
@@ -282,11 +331,11 @@ func generatePDF(req GenerateRequest, recipient map[string]string, bgImageBytes 
 		}
 		switch valign {
 		case "top":
-			drawY = y + fontMm*0.75 // baseline below top
+			drawY = y + fsMm*0.82
 		case "bottom":
-			drawY = y // baseline at the point
+			drawY = y - fsMm*0.38
 		default: // middle
-			drawY = y + fontMm*0.35
+			drawY = y + fsMm*0.22
 		}
 
 		pdf.Text(drawX, drawY, text)
